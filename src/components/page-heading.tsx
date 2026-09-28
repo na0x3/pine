@@ -1,0 +1,1 @@
+export function PageHeading({ eyebrow, title, description, actions }: { eyebrow: string; title: string; description: string; actions?: React.ReactNode }) { return <div className="page-head"><div><div className="eyebrow">{eyebrow}</div><h1>{title}</h1><div className="subtle">{description}</div></div>{actions && <div className="button-row">{actions}</div>}</div>; }

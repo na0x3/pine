@@ -1,0 +1,314 @@
+generator client {
+  provider = "prisma-client-js"
+}
+
+datasource db {
+  provider = "postgresql"
+  url      = env("DATABASE_URL")
+}
+
+enum Role {
+  ADMIN
+  MANAGER
+  ANALYST
+  VIEWER
+}
+enum CustomerType {
+  INDIVIDUAL
+  BUSINESS
+}
+enum RiskRating {
+  LOW
+  MEDIUM
+  HIGH
+}
+enum KycStatus {
+  PENDING
+  VERIFIED
+  NEEDS_REVIEW
+  REJECTED
+}
+enum TransactionType {
+  ACH
+  WIRE
+  CARD
+  BANK_TRANSFER
+  REMITTANCE
+  MERCHANT_PAYMENT
+  CRYPTO
+  STABLECOIN
+  CASH_EQUIVALENT
+  OTHER
+}
+enum Direction {
+  INBOUND
+  OUTBOUND
+}
+enum AlertStatus {
+  OPEN
+  INVESTIGATING
+  NEEDS_INFORMATION
+  ESCALATED
+  UNDER_REVIEW
+  CLOSED
+}
+enum Severity {
+  LOW
+  MEDIUM
+  HIGH
+  CRITICAL
+}
+enum DecisionType {
+  CLOSE
+  REQUEST_INFORMATION
+  ESCALATE
+  SUSPICIOUS_ACTIVITY_REVIEW
+}
+
+model Organization {
+  id             String @id @default(cuid())
+  name           String
+  slug           String @unique
+  createdAt      DateTime @default(now())
+  users          User[]
+  customers      Customer[]
+  accounts       Account[]
+  transactions   Transaction[]
+  alerts         Alert[]
+  investigations Investigation[]
+  auditLogs      AuditLog[]
+}
+
+model User {
+  id           String @id @default(cuid())
+  organizationId String
+  organization Organization @relation(fields: [organizationId], references: [id])
+  name         String
+  email        String @unique
+  passwordHash String
+  role         Role @default(ANALYST)
+  active       Boolean @default(true)
+  createdAt    DateTime @default(now())
+  sessions     Session[]
+  assignedAlerts Alert[] @relation("AssignedAnalyst")
+  decisions    AnalystDecision[]
+  investigationsCreated Investigation[] @relation("InvestigationCreator")
+  @@index([organizationId, role])
+  @@unique([id, organizationId])
+}
+
+model Session {
+  id        String @id @default(cuid())
+  userId    String
+  user      User @relation(fields: [userId], references: [id], onDelete: Cascade)
+  tokenHash String @unique
+  expiresAt DateTime
+  createdAt DateTime @default(now())
+}
+
+model LoginAttempt {
+  id String @id @default(cuid())
+  email String
+  ipHash String
+  successful Boolean
+  createdAt DateTime @default(now())
+  @@index([email, createdAt])
+  @@index([ipHash, createdAt])
+}
+
+model Customer {
+  id String @id @default(cuid())
+  organizationId String
+  organization Organization @relation(fields: [organizationId], references: [id])
+  type CustomerType
+  fullName String?
+  businessName String?
+  legalName String?
+  email String?
+  phone String?
+  country String
+  riskRating RiskRating @default(LOW)
+  kycStatus KycStatus @default(PENDING)
+  createdAt DateTime @default(now())
+  occupation String?
+  businessIndustry String?
+  incorporationCountry String?
+  beneficialOwners Json?
+  annualRevenue Decimal? @db.Decimal(16, 2)
+  sourceOfFunds String?
+  expectedMonthlyVolume Decimal? @db.Decimal(16, 2)
+  expectedTransactionMin Decimal? @db.Decimal(16, 2)
+  expectedTransactionMax Decimal? @db.Decimal(16, 2)
+  metadata Json?
+  transactions Transaction[]
+  alerts Alert[]
+  accounts Account[]
+  @@unique([id, organizationId])
+  @@index([organizationId, fullName])
+}
+
+model Account {
+  id String @id @default(cuid())
+  organizationId String
+  organization Organization @relation(fields: [organizationId], references: [id])
+  customerId String
+  customer Customer @relation(fields: [customerId, organizationId], references: [id, organizationId])
+  displayName String
+  institutionName String?
+  type String
+  lastFour String?
+  currency String @default("USD")
+  status String @default("ACTIVE")
+  openedAt DateTime
+  metadata Json?
+  @@index([organizationId, customerId])
+}
+
+model Transaction {
+  id String @id @default(cuid())
+  organizationId String
+  organization Organization @relation(fields: [organizationId], references: [id])
+  customerId String
+  customer Customer @relation(fields: [customerId, organizationId], references: [id, organizationId])
+  type TransactionType
+  direction Direction
+  amount Decimal @db.Decimal(16, 2)
+  currency String @default("USD")
+  timestamp DateTime
+  counterpartyName String?
+  counterpartyId String?
+  counterpartyCountry String?
+  paymentRail String?
+  status String @default("COMPLETED")
+  description String?
+  merchantCategory String?
+  walletAddress String?
+  blockchain String?
+  transactionHash String?
+  metadata Json?
+  alerts Alert[]
+  @@unique([id, organizationId])
+  @@unique([id, customerId, organizationId])
+  @@index([organizationId, customerId, timestamp])
+}
+
+model Alert {
+  id String @id @default(cuid())
+  organizationId String
+  organization Organization @relation(fields: [organizationId], references: [id])
+  customerId String
+  customer Customer @relation(fields: [customerId, organizationId], references: [id, organizationId])
+  transactionId String
+  transaction Transaction @relation(fields: [transactionId, customerId, organizationId], references: [id, customerId, organizationId])
+  type String
+  description String
+  riskScore Int
+  severity Severity
+  status AlertStatus @default(OPEN)
+  assignedAnalystId String?
+  assignedAnalyst User? @relation("AssignedAnalyst", fields: [assignedAnalystId, organizationId], references: [id, organizationId])
+  createdAt DateTime @default(now())
+  updatedAt DateTime @updatedAt
+  investigations Investigation[]
+  decisions AnalystDecision[]
+  @@unique([id, organizationId])
+  @@index([organizationId, status, createdAt])
+}
+
+model Investigation {
+  id String @id @default(cuid())
+  organizationId String
+  organization Organization @relation(fields: [organizationId], references: [id])
+  alertId String
+  alert Alert @relation(fields: [alertId, organizationId], references: [id, organizationId])
+  version Int
+  model String
+  source String @default("OPENAI")
+  output Json
+  contextSnapshot Json
+  createdById String
+  createdBy User @relation("InvestigationCreator", fields: [createdById, organizationId], references: [id, organizationId])
+  startedAt DateTime @default(now())
+  completedAt DateTime @default(now())
+  signals RiskSignal[]
+  evidence Evidence[]
+  factors RiskFactor[]
+  @@unique([alertId, version])
+  @@unique([id, organizationId])
+  @@index([organizationId, completedAt])
+}
+
+model RiskSignal {
+  id String @id @default(cuid())
+  organizationId String
+  investigationId String
+  investigation Investigation @relation(fields: [investigationId, organizationId], references: [id, organizationId])
+  signal String
+  severity Severity
+  value Float?
+  description String
+  evidenceIds Json
+  createdAt DateTime @default(now())
+  @@index([organizationId, investigationId])
+}
+
+model RiskFactor {
+  id String @id @default(cuid())
+  organizationId String
+  investigationId String
+  investigation Investigation @relation(fields: [investigationId, organizationId], references: [id, organizationId])
+  title String
+  severity Severity
+  explanation String
+  evidenceIds Json
+  createdAt DateTime @default(now())
+  @@index([organizationId, investigationId])
+}
+
+model Evidence {
+  id String @id
+  referenceId String
+  organizationId String
+  investigationId String
+  investigation Investigation @relation(fields: [investigationId, organizationId], references: [id, organizationId])
+  type String
+  source String
+  label String
+  value String
+  metadata Json?
+  createdAt DateTime @default(now())
+  @@unique([investigationId, referenceId])
+  @@index([organizationId, investigationId])
+}
+
+model AnalystDecision {
+  id String @id @default(cuid())
+  organizationId String
+  alertId String
+  alert Alert @relation(fields: [alertId, organizationId], references: [id, organizationId])
+  analystId String
+  analyst User @relation(fields: [analystId, organizationId], references: [id, organizationId])
+  investigationId String?
+  decision DecisionType
+  note String
+  aiRecommendation String?
+  agreedWithAi Boolean?
+  createdAt DateTime @default(now())
+  @@index([organizationId, alertId, createdAt])
+}
+
+model AuditLog {
+  id String @id @default(cuid())
+  organizationId String
+  organization Organization @relation(fields: [organizationId], references: [id])
+  actorUserId String?
+  entityType String
+  entityId String
+  action String
+  previousValue Json?
+  newValue Json?
+  metadata Json?
+  timestamp DateTime @default(now())
+  @@index([organizationId, timestamp])
+  @@index([organizationId, entityType, entityId])
+}

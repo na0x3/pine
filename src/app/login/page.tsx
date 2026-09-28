@@ -1,0 +1,4 @@
+import { currentUser } from '@/lib/auth';
+import { redirect } from 'next/navigation';
+import { LoginForm } from '@/components/login-form';
+export default async function LoginPage() { if (await currentUser()) redirect('/alerts'); return <div className="login-page"><div className="login-art"><div className="brand" style={{ border: 0, padding: 0 }}><span className="brand-mark">V</span><span>varia.</span></div><div><div className="eyebrow" style={{ color: '#b4d8b5' }}>FINANCIAL OPERATIONS, CLEARLY</div><h1>Every alert deserves a clear answer.</h1><p>One workspace to understand activity, inspect evidence, and make a documented human decision.</p></div><span style={{ color: '#8fb09a', fontSize: 11 }}>Investigation support for modern financial teams</span></div><div className="login-form-side"><LoginForm/></div></div>; }

@@ -1,0 +1,6 @@
+import { requireUser } from '@/lib/auth';
+import { db } from '@/lib/db';
+import { date } from '@/lib/format';
+import { PageHeading } from '@/components/page-heading';
+import { Badge } from '@/components/badge';
+export default async function SettingsPage() { const user = await requireUser(); const members = await db.user.findMany({ where: { organizationId: user.organizationId }, orderBy: { name: 'asc' } }); return <div className="content"><PageHeading eyebrow="WORKSPACE" title="Settings" description="Organization details and access roles."/><section className="card card-pad" style={{ marginBottom: 17 }}><h2>{user.organization.name}</h2><div className="subtle" style={{ marginTop: 8 }}>Workspace ID: {user.organizationId} · Created {date(user.organization.createdAt)}</div></section><section className="card"><div className="card-header"><div><h2>Team members</h2><small>Roles are enforced on the server for case actions and assignments</small></div></div><div className="table-wrap"><table><thead><tr><th>Name</th><th>Email</th><th>Role</th><th>Status</th></tr></thead><tbody>{members.map(m => <tr key={m.id}><td style={{ fontWeight: 700 }}>{m.name}</td><td>{m.email}</td><td><Badge value={m.role}/></td><td>{m.active ? 'Active' : 'Inactive'}</td></tr>)}</tbody></table></div></section></div>; }
