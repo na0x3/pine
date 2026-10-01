@@ -9,7 +9,7 @@ test('analyst investigates, reviews evidence, decides, and exports', async ({ pa
   await expect(page.locator('tbody tr')).toHaveCount(20);
   await page.getByRole('link', { name: 'ALT-01042' }).click();
   await expect(page.getByText('Maya Torres').first()).toBeVisible();
-  await page.getByRole('button', { name: 'Investigate with AI' }).click();
+  await page.getByRole('button', { name: /Run synthetic analysis|Investigate with AI/ }).click();
   await expect(page.getByText('Investigation saved as a new version.')).toBeVisible();
   await expect(page.getByText('Investigation analysis')).toBeVisible();
   await page.locator('.factor').first().click();

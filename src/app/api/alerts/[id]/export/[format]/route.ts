@@ -3,7 +3,10 @@ import { getAlertCase, getCaseTimeline } from '@/lib/case-service';
 import { db } from '@/lib/db';
 import { customerName, dateTime, money, title } from '@/lib/format';
 import { investigationSchema } from '@/lib/validation';
-import { PDFDocument, StandardFonts, rgb } from 'pdf-lib';
+import { PDFDocument, rgb } from 'pdf-lib';
+import fontkit from '@pdf-lib/fontkit';
+import { readFile } from 'node:fs/promises';
+import { join } from 'node:path';
 
 export async function GET(_request: Request, { params }: { params: Promise<{ id: string; format: string }> }) {
   const auth = await requireRole(['ADMIN', 'MANAGER', 'ANALYST', 'VIEWER']);
@@ -14,21 +17,25 @@ export async function GET(_request: Request, { params }: { params: Promise<{ id:
   if (!alert) return Response.json({ error: 'Alert not found' }, { status: 404 });
   await db.auditLog.create({ data: { organizationId: auth.user.organizationId, actorUserId: auth.user.id, entityType: 'Alert', entityId: id, action: 'EXPORT_GENERATED', metadata: { format } } });
   const [timeline, history] = await Promise.all([
-    getCaseTimeline(id, auth.user.organizationId),
-    db.transaction.findMany({ where: { organizationId: auth.user.organizationId, customerId: alert.customerId, timestamp: { lte: alert.transaction.timestamp } }, orderBy: { timestamp: 'desc' }, take: 80 }),
+    getCaseTimeline(id, auth.user.organizationId, null),
+    db.transaction.findMany({ where: { organizationId: auth.user.organizationId, customerId: alert.customerId, timestamp: { lte: alert.transaction.timestamp } }, orderBy: { timestamp: 'desc' } }),
   ]);
   const report = { generatedAt: new Date().toISOString(), organization: auth.user.organization.name, alert, transactionHistory: history, timeline, notice: 'AI-generated investigation output is decision support only and must be reviewed by an authorized human analyst.' };
   if (format === 'json') return new Response(JSON.stringify(report, null, 2), { headers: { 'content-type': 'application/json', 'content-disposition': `attachment; filename="${id}-investigation.json"`, 'cache-control': 'no-store' } });
   const pdf = await PDFDocument.create();
-  const regular = await pdf.embedFont(StandardFonts.Helvetica);
-  const bold = await pdf.embedFont(StandardFonts.HelveticaBold);
+  pdf.registerFontkit(fontkit);
+  const [regularBytes, boldBytes] = await Promise.all([
+    readFile(join(process.cwd(), 'assets/fonts/NotoSans-Regular.ttf')),
+    readFile(join(process.cwd(), 'assets/fonts/NotoSans-Bold.ttf')),
+  ]);
+  const regular = await pdf.embedFont(regularBytes);
+  const bold = await pdf.embedFont(boldBytes);
   let page = pdf.addPage([612, 792]);
   let y = 748;
   const addPage = () => { page = pdf.addPage([612, 792]); y = 748; };
   const line = (text: string, size = 10, strong = false, color = rgb(0.13, 0.18, 0.23)) => {
     const font = strong ? bold : regular;
-    const clean = text.replace(/[^\x20-\x7E]/g, '-');
-    const words = clean.split(/\s+/);
+    const words = text.split(/\s+/);
     let part = '';
     for (const word of words) {
       const next = part ? `${part} ${word}` : word;

@@ -90,7 +90,7 @@ tbody tr:hover {background:#fafcf9;}
 .risk-fill {height:100%;border-radius:8px;background:#ce9c44;}
 .risk-fill.high {background:#d47452;}
 .risk-fill.low {background:#78a889;}
-.table-footer {padding:13px 18px;color:#839087;font-size:10px;border-top:1px solid var(--line);}
+.table-footer {padding:13px 18px;color:#839087;font-size:10px;border-top:1px solid var(--line);display:flex;align-items:center;justify-content:space-between;gap:12px;flex-wrap:wrap;}
 .case-grid {display:grid;grid-template-columns:minmax(220px, .86fr) minmax(400px, 1.85fr) minmax(238px,.9fr);gap:17px;align-items:start;}
 .stack {display:grid;gap:17px;min-width:0;}
 .section-pad {padding:19px 20px;}

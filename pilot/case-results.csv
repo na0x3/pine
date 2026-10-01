@@ -1,0 +1,1 @@
+case_id,workflow,analyst_id,case_type,complexity,reference_disposition,actual_disposition,active_minutes,decision_quality,evidence_quality,critical_miss,ai_used,unsupported_ai_claim,import_success,notes

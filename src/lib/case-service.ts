@@ -1,10 +1,11 @@
 import { db } from './db';
 import { calculateRiskSignals, type RiskTransaction } from './risk-engine';
 import { investigationSchema, type InvestigationOutput } from './validation';
-import { customerName, money } from './format';
+import { money } from './format';
 import type { Prisma, User } from '@prisma/client';
 import OpenAI from 'openai';
 import { zodTextFormat } from 'openai/helpers/zod';
+import { connectionStatus, planInvestigation } from './chatgpt-plan';
 
 type Actor = Pick<User, 'id' | 'organizationId' | 'role'>;
 type EvidenceInput = { id: string; organizationId: string; type: string; source: string; label: string; value: string; metadata?: Prisma.InputJsonValue };
@@ -25,8 +26,8 @@ export async function getAlertCase(alertId: string, organizationId: string) {
   });
 }
 
-export async function getCaseTimeline(alertId: string, organizationId: string) {
-  return db.auditLog.findMany({ where: { organizationId, entityType: 'Alert', entityId: alertId }, orderBy: { timestamp: 'desc' }, take: 30 });
+export async function getCaseTimeline(alertId: string, organizationId: string, limit: number | null = 30) {
+  return db.auditLog.findMany({ where: { organizationId, entityType: 'Alert', entityId: alertId }, orderBy: { timestamp: 'desc' }, take: limit ?? undefined });
 }
 
 function demoInvestigation(signals: ReturnType<typeof calculateRiskSignals>, evidence: EvidenceInput[], customer: { kycStatus: string }): InvestigationOutput {
@@ -54,36 +55,47 @@ export async function investigateAlert(alertId: string, actor: Actor) {
   if (recent >= 10) throw new CaseError('Investigation limit reached. Try again in one hour.', 429);
   const history = await db.transaction.findMany({ where: { organizationId: actor.organizationId, customerId: alert.customerId, timestamp: { lte: alert.transaction.timestamp } }, orderBy: { timestamp: 'desc' }, take: 80 });
   const previousAlerts = await db.alert.findMany({ where: { organizationId: actor.organizationId, customerId: alert.customerId, id: { not: alert.id }, createdAt: { lt: alert.createdAt } }, select: { id: true, type: true, createdAt: true, status: true }, orderBy: { createdAt: 'desc' }, take: 20 });
-  const mapTxn = (t: typeof alert.transaction): RiskTransaction => ({ id: t.id, amount: Number(t.amount), timestamp: t.timestamp, direction: t.direction, counterpartyName: t.counterpartyName, counterpartyCountry: t.counterpartyCountry, paymentRail: t.paymentRail, metadata: t.metadata && typeof t.metadata === 'object' && !Array.isArray(t.metadata) ? t.metadata as Record<string, unknown> : null });
+  const mapTxn = (t: typeof alert.transaction): RiskTransaction => ({ id: t.id, amount: Number(t.amount), currency: t.currency, timestamp: t.timestamp, direction: t.direction, counterpartyName: t.counterpartyName, counterpartyCountry: t.counterpartyCountry, paymentRail: t.paymentRail, metadata: t.metadata && typeof t.metadata === 'object' && !Array.isArray(t.metadata) ? t.metadata as Record<string, unknown> : null });
   const signals = calculateRiskSignals({
     current: mapTxn(alert.transaction), history: history.map(mapTxn),
-    customer: { createdAt: alert.customer.createdAt, kycStatus: alert.customer.kycStatus, country: alert.customer.country, expectedMonthlyVolume: alert.customer.expectedMonthlyVolume ? Number(alert.customer.expectedMonthlyVolume) : null },
+    customer: { createdAt: alert.customer.createdAt, onboardedAt: alert.customer.onboardedAt, kycStatus: alert.customer.kycStatus, country: alert.customer.country, expectedMonthlyVolume: alert.customer.expectedMonthlyVolume ? Number(alert.customer.expectedMonthlyVolume) : null, expectedMonthlyVolumeCurrency: alert.customer.expectedMonthlyVolumeCurrency },
     previousAlerts,
   });
   const evidence: EvidenceInput[] = [
     { id: alert.transaction.id, organizationId: actor.organizationId, type: 'TRANSACTION', source: alert.transaction.id, label: 'Triggering transaction', value: `${money(Number(alert.transaction.amount), alert.transaction.currency)} ${alert.transaction.direction.toLowerCase()} ${alert.transaction.type.toLowerCase()} to ${alert.transaction.counterpartyName ?? 'unknown counterparty'}`, metadata: json({ timestamp: alert.transaction.timestamp, country: alert.transaction.counterpartyCountry, rail: alert.transaction.paymentRail }) },
     { id: 'customer:kycStatus', organizationId: actor.organizationId, type: 'CUSTOMER_FIELD', source: alert.customerId, label: 'KYC status', value: alert.customer.kycStatus },
-    { id: 'customer:createdAt', organizationId: actor.organizationId, type: 'CUSTOMER_FIELD', source: alert.customerId, label: 'Account opened', value: alert.customer.createdAt.toISOString() },
-    { id: 'customer:expectedMonthlyVolume', organizationId: actor.organizationId, type: 'CUSTOMER_FIELD', source: alert.customerId, label: 'Expected monthly volume', value: alert.customer.expectedMonthlyVolume ? money(Number(alert.customer.expectedMonthlyVolume)) : 'Unknown' },
+    { id: 'customer:onboardedAt', organizationId: actor.organizationId, type: 'CUSTOMER_FIELD', source: alert.customerId, label: 'Customer onboarded', value: (alert.customer.onboardedAt ?? alert.customer.createdAt).toISOString() },
+    { id: 'customer:expectedMonthlyVolume', organizationId: actor.organizationId, type: 'CUSTOMER_FIELD', source: alert.customerId, label: 'Expected monthly volume', value: alert.customer.expectedMonthlyVolume ? money(Number(alert.customer.expectedMonthlyVolume), alert.customer.expectedMonthlyVolumeCurrency) : 'Unknown' },
     ...history.filter(t => t.id !== alert.transaction.id).map(t => ({ id: t.id, organizationId: actor.organizationId, type: 'HISTORICAL_TRANSACTION', source: t.id, label: `${t.type} · ${t.counterpartyName ?? 'Unknown counterparty'}`, value: `${money(Number(t.amount), t.currency)} on ${t.timestamp.toISOString().slice(0, 10)}` })),
     ...previousAlerts.map(a => ({ id: a.id, organizationId: actor.organizationId, type: 'PREVIOUS_ALERT', source: a.id, label: a.type, value: `${a.status} on ${a.createdAt.toISOString().slice(0, 10)}` })),
     ...signals.map(s => ({ id: `signal:${s.signal}`, organizationId: actor.organizationId, type: 'RISK_SIGNAL', source: s.signal, label: s.signal.replaceAll('_', ' '), value: s.description, metadata: json({ severity: s.severity, value: s.value, evidenceIds: s.evidenceIds }) })),
   ];
+  // This snapshot is the exact, minimized model payload when AI is enabled. Names,
+  // account details, identifiers from providers, and free-form metadata stay local.
   const context = {
-    alert: { id: alert.id, type: alert.type, description: alert.description, severity: alert.severity, riskScore: alert.riskScore },
-    customer: { id: alert.customer.id, name: customerName(alert.customer), type: alert.customer.type, country: alert.customer.country, kycStatus: alert.customer.kycStatus, riskRating: alert.customer.riskRating, createdAt: alert.customer.createdAt, occupation: alert.customer.occupation, industry: alert.customer.businessIndustry, sourceOfFunds: alert.customer.sourceOfFunds, expectedMonthlyVolume: alert.customer.expectedMonthlyVolume?.toString() ?? null, accounts: alert.customer.accounts },
-    transaction: { ...alert.transaction, amount: alert.transaction.amount.toString() },
-    historicalTransactions: history.map(t => ({ ...t, amount: t.amount.toString() })), previousAlerts, signals,
-    evidence: evidence.map(({ id, type, label, value }) => ({ id, type, label, value })),
+    alert: { id: alert.id, type: alert.type, severity: alert.severity, riskScore: alert.riskScore },
+    customer: { type: alert.customer.type, country: alert.customer.country, kycStatus: alert.customer.kycStatus, riskRating: alert.customer.riskRating, onboardedAt: alert.customer.onboardedAt ?? alert.customer.createdAt, expectedMonthlyVolume: alert.customer.expectedMonthlyVolume?.toString() ?? null, expectedMonthlyVolumeCurrency: alert.customer.expectedMonthlyVolumeCurrency },
+    transaction: { id: alert.transaction.id, amount: alert.transaction.amount.toString(), currency: alert.transaction.currency, timestamp: alert.transaction.timestamp, direction: alert.transaction.direction, type: alert.transaction.type, counterpartyCountry: alert.transaction.counterpartyCountry, paymentRail: alert.transaction.paymentRail },
+    historicalTransactions: history.map(t => ({ id: t.id, amount: t.amount.toString(), currency: t.currency, timestamp: t.timestamp, direction: t.direction, type: t.type, counterpartyCountry: t.counterpartyCountry, paymentRail: t.paymentRail })),
+    previousAlerts, signals,
+    evidence: evidence.map(({ id, type, label, value }) => ({ id, type, label: type === 'HISTORICAL_TRANSACTION' ? 'Historical transaction' : label, value: type === 'TRANSACTION' || type === 'HISTORICAL_TRANSACTION' ? undefined : value })),
   };
   await db.auditLog.create({ data: { organizationId: actor.organizationId, actorUserId: actor.id, entityType: 'Alert', entityId: alert.id, action: 'INVESTIGATION_STARTED', metadata: { signalCount: signals.length } } });
   let output: InvestigationOutput;
   let model: string;
   let source: string;
   try {
-    if (process.env.OPENAI_API_KEY) {
+    const plan = await connectionStatus(actor.id);
+    if (plan.connected && plan.model && process.env.OPENAI_DATA_SHARING_ENABLED === 'true') {
+      source = 'CHATGPT_PLAN';
+      await db.auditLog.create({ data: { organizationId: actor.organizationId, actorUserId: actor.id, entityType: 'Alert', entityId: alert.id, action: 'AI_CONTEXT_SUBMISSION_STARTED', metadata: { model: plan.model, source, transactionCount: context.historicalTransactions.length, evidenceCount: context.evidence.length } } });
+      const result = await planInvestigation(actor.id, context);
+      model = result.model;
+      output = result.output;
+    } else if (process.env.OPENAI_API_KEY && process.env.OPENAI_DATA_SHARING_ENABLED === 'true') {
       model = process.env.OPENAI_MODEL || 'gpt-4o-mini';
       source = 'OPENAI';
+      await db.auditLog.create({ data: { organizationId: actor.organizationId, actorUserId: actor.id, entityType: 'Alert', entityId: alert.id, action: 'AI_CONTEXT_SUBMISSION_STARTED', metadata: { model, transactionCount: context.historicalTransactions.length, evidenceCount: context.evidence.length } } });
       const client = new OpenAI({ apiKey: process.env.OPENAI_API_KEY });
       const response = await client.responses.parse({
         model,
@@ -103,18 +115,24 @@ export async function investigateAlert(alertId: string, actor: Actor) {
     for (const factor of [...output.risk_factors, ...output.mitigating_factors]) {
       if (!factor.evidence_ids.length || factor.evidence_ids.some(id => !allowed.has(id))) throw new CaseError('Investigation cites missing evidence', 502);
     }
-    const version = (alert.investigations[0]?.version ?? 0) + 1;
-    const nextStatus = alert.status === 'OPEN' ? 'INVESTIGATING' : alert.status;
     const investigation = await db.$transaction(async tx => {
+      // Lock this alert before checking its status and allocating the next version.
+      // A decision that closes it while the model runs must win the race.
+      const locked = await tx.alert.updateMany({ where: { id: alert.id, organizationId: actor.organizationId, status: { not: 'CLOSED' } }, data: { updatedAt: new Date() } });
+      if (locked.count !== 1) throw new CaseError('Alert was closed during investigation', 409);
+      const current = await tx.alert.findFirstOrThrow({ where: { id: alert.id, organizationId: actor.organizationId }, select: { status: true } });
+      const latest = await tx.investigation.findFirst({ where: { alertId: alert.id, organizationId: actor.organizationId }, orderBy: { version: 'desc' }, select: { version: true } });
+      const version = (latest?.version ?? 0) + 1;
+      const nextStatus = current.status === 'OPEN' ? 'INVESTIGATING' : current.status;
       const created = await tx.investigation.create({ data: { organizationId: actor.organizationId, alertId: alert.id, version, model, source, output: json(output), contextSnapshot: json(context), createdById: actor.id, startedAt, completedAt: new Date() } });
       await tx.evidence.createMany({ data: evidence.map(({ id, organizationId, type, source, label, value, metadata }) => ({ id: `${created.id}:${id}`, referenceId: id, organizationId, investigationId: created.id, type, source, label, value, metadata })) });
       await tx.riskSignal.createMany({ data: signals.map(s => ({ organizationId: actor.organizationId, investigationId: created.id, signal: s.signal, severity: s.severity, value: s.value, description: s.description, evidenceIds: s.evidenceIds })) });
       await tx.riskFactor.createMany({ data: output.risk_factors.map(f => ({ organizationId: actor.organizationId, investigationId: created.id, title: f.title, severity: f.severity.toUpperCase() as 'LOW' | 'MEDIUM' | 'HIGH' | 'CRITICAL', explanation: f.explanation, evidenceIds: f.evidence_ids })) });
-      if (nextStatus !== alert.status) await tx.alert.update({ where: { id: alert.id, organizationId: actor.organizationId }, data: { status: nextStatus } });
+      if (nextStatus !== current.status) await tx.alert.update({ where: { id: alert.id, organizationId: actor.organizationId }, data: { status: nextStatus } });
       await tx.auditLog.createMany({ data: [
         { organizationId: actor.organizationId, actorUserId: actor.id, entityType: 'Alert', entityId: alert.id, action: 'INVESTIGATION_COMPLETED', metadata: { investigationId: created.id, version, model, source } },
         { organizationId: actor.organizationId, actorUserId: actor.id, entityType: 'Alert', entityId: alert.id, action: 'AI_OUTPUT_VERSION', metadata: { investigationId: created.id, version, model, source } },
-        ...(nextStatus !== alert.status ? [{ organizationId: actor.organizationId, actorUserId: actor.id, entityType: 'Alert', entityId: alert.id, action: 'STATUS_CHANGED', previousValue: { status: alert.status }, newValue: { status: nextStatus } }] : []),
+        ...(nextStatus !== current.status ? [{ organizationId: actor.organizationId, actorUserId: actor.id, entityType: 'Alert', entityId: alert.id, action: 'STATUS_CHANGED', previousValue: { status: current.status }, newValue: { status: nextStatus } }] : []),
       ] });
       return created;
     });
@@ -132,7 +150,7 @@ export async function decideAlert(alertId: string, actor: Actor, decision: 'CLOS
   const status = { CLOSE: 'CLOSED', REQUEST_INFORMATION: 'NEEDS_INFORMATION', ESCALATE: 'ESCALATED', SUSPICIOUS_ACTIVITY_REVIEW: 'UNDER_REVIEW' }[decision] as 'CLOSED' | 'NEEDS_INFORMATION' | 'ESCALATED' | 'UNDER_REVIEW';
   const investigation = alert.investigations[0];
   const recommendation = investigation ? investigationSchema.parse(investigation.output).recommended_action : null;
-  const agreedWithAi = recommendation === null ? null : recommendation.toUpperCase() === decision;
+  const agreedWithAi = recommendation === null || !['OPENAI', 'CHATGPT_PLAN'].includes(investigation?.source ?? '') ? null : recommendation.toUpperCase() === decision;
   return db.$transaction(async tx => {
     const claimed = await tx.alert.updateMany({ where: { id: alertId, organizationId: actor.organizationId, status: { not: 'CLOSED' } }, data: { status } });
     if (claimed.count !== 1) throw new CaseError('Alert has already been closed', 409);

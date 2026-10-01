@@ -36,17 +36,17 @@ export async function requireRole(roles: Role[]) {
 export async function verifyOrigin(request: Request) {
   const origin = request.headers.get('origin');
   const host = (await headers()).get('host');
-  if (!origin || !host || new URL(origin).host !== host) return false;
-  return true;
+  if (!origin || !host) return false;
+  try { return new URL(origin).host === host; } catch { return false; }
 }
 
-export async function signIn(email: string, password: string, ip: string) {
+export async function signIn(email: string, password: string, ip: string | null) {
   const normalized = email.trim().toLowerCase();
-  const ipHash = hash(ip || 'unknown');
+  const ipHash = hash(ip || 'untrusted-proxy');
   const since = new Date(Date.now() - 15 * 60_000);
   const [emailFailures, ipFailures] = await Promise.all([
     db.loginAttempt.count({ where: { email: normalized, successful: false, createdAt: { gt: since } } }),
-    db.loginAttempt.count({ where: { ipHash, successful: false, createdAt: { gt: since } } }),
+    ip ? db.loginAttempt.count({ where: { ipHash, successful: false, createdAt: { gt: since } } }) : Promise.resolve(0),
   ]);
   if (emailFailures >= 8 || ipFailures >= 30) return false;
   const user = await db.user.findUnique({ where: { email: normalized } });

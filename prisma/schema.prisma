@@ -77,6 +77,7 @@ model Organization {
   alerts         Alert[]
   investigations Investigation[]
   auditLogs      AuditLog[]
+  ingestionKeys  IngestionKey[]
 }
 
 model User {
@@ -93,6 +94,7 @@ model User {
   assignedAlerts Alert[] @relation("AssignedAnalyst")
   decisions    AnalystDecision[]
   investigationsCreated Investigation[] @relation("InvestigationCreator")
+  ingestionKeysCreated IngestionKey[] @relation("IngestionKeyCreator")
   @@index([organizationId, role])
   @@unique([id, organizationId])
 }
@@ -116,10 +118,26 @@ model LoginAttempt {
   @@index([ipHash, createdAt])
 }
 
+model IngestionKey {
+  id String @id @default(cuid())
+  organizationId String
+  organization Organization @relation(fields: [organizationId], references: [id])
+  name String
+  tokenHash String @unique
+  tokenPrefix String
+  createdById String
+  createdBy User @relation("IngestionKeyCreator", fields: [createdById, organizationId], references: [id, organizationId])
+  createdAt DateTime @default(now())
+  lastUsedAt DateTime?
+  revokedAt DateTime?
+  @@index([organizationId, revokedAt])
+}
+
 model Customer {
   id String @id @default(cuid())
   organizationId String
   organization Organization @relation(fields: [organizationId], references: [id])
+  sourceReference String?
   type CustomerType
   fullName String?
   businessName String?
@@ -130,6 +148,7 @@ model Customer {
   riskRating RiskRating @default(LOW)
   kycStatus KycStatus @default(PENDING)
   createdAt DateTime @default(now())
+  onboardedAt DateTime?
   occupation String?
   businessIndustry String?
   incorporationCountry String?
@@ -137,6 +156,7 @@ model Customer {
   annualRevenue Decimal? @db.Decimal(16, 2)
   sourceOfFunds String?
   expectedMonthlyVolume Decimal? @db.Decimal(16, 2)
+  expectedMonthlyVolumeCurrency String @default("USD")
   expectedTransactionMin Decimal? @db.Decimal(16, 2)
   expectedTransactionMax Decimal? @db.Decimal(16, 2)
   metadata Json?
@@ -144,6 +164,7 @@ model Customer {
   alerts Alert[]
   accounts Account[]
   @@unique([id, organizationId])
+  @@unique([organizationId, sourceReference])
   @@index([organizationId, fullName])
 }
 
@@ -185,10 +206,12 @@ model Transaction {
   walletAddress String?
   blockchain String?
   transactionHash String?
+  sourceReference String?
   metadata Json?
   alerts Alert[]
   @@unique([id, organizationId])
   @@unique([id, customerId, organizationId])
+  @@unique([organizationId, sourceReference])
   @@index([organizationId, customerId, timestamp])
 }
 
